@@ -85,12 +85,6 @@ mem_block_t *get_prev_block(char *block_ptr){
     return (mem_block_t *) (((char *) block_ptr) - abs64(prev_block_size));
 }
 
-void init_block(mem_block_t *new_block, int64_t size){
-    debug("woo i got size %lld", size);
-    new_block->mb_size = size;
-    set_boundary_tag(new_block);
-}
-
 int belongs_to_arena(void *ptr, mem_arena_t *arena){
     return ( (char *) &arena->ma_first <= (char *) ptr) && ((char *) ptr < (char *) arena->end_of_arena);
 }
@@ -111,6 +105,30 @@ int is_last_block_on_arena(void *ptr, mem_arena_t *arena){
     return !(belongs_to_arena(get_next_block(ptr), arena));
 }
 
+mem_arena_t *get_containing_arena(mem_block_t *ptr){
+    mem_arena_t *arena_ptr;
+    LIST_FOREACH(arena_ptr, arenas, ma_link) {
+        if (belongs_to_arena(ptr, arena_ptr))
+            return arena_ptr;
+    }
+    return NULL;
+}
+
+void set_boundary_tag(mem_block_t *block_ptr){
+    int64_t *boundary_tag = get_boundary_tag((char *) block_ptr);
+    if(belongs_to_arena(boundary_tag, get_containing_arena(block_ptr))){
+        *boundary_tag = abs64(block_ptr->mb_size);
+    }
+}
+// boundary tag wont be set for this first big block,
+// but it doesnt matter since there cant be any block behind it
+// (boundary tag at the end of arena is useless)
+
+void init_block(mem_block_t *new_block, int64_t size){
+    new_block->mb_size = size;
+    set_boundary_tag(new_block);
+}
+
 void init_arena(mem_arena_t *new_arena, int64_t size){
     new_arena->end_of_arena = (void *) (((char *) new_arena) + size - 24);
     LIST_INSERT_HEAD(arenas, new_arena, ma_link);
@@ -126,7 +144,6 @@ void *append_new_arena(size_t size){
                                   MAP_PRIVATE | MAP_ANONYMOUS,
                                   -1, 0);
 
-    debug("WE GOT NEW ARENA %p of size %lld", new_arena, size);
     if(new_arena == MAP_FAILED){
         //assert(errno == EINVAL || errno == ENOMEM);
         return MAP_FAILED;
@@ -154,15 +171,11 @@ int is_last_block_on_any_arena(void *ptr){
 }
 
 mem_block_t *get_free_block(size_t size) {
-    //assert(size > 0);
-
     mem_arena_t *arena_ptr;
     LIST_FOREACH(arena_ptr, arenas, ma_link) {
         mem_block_t *block_ptr;
         LIST_FOREACH(block_ptr, &arena_ptr->ma_freeblks, mb_link) {
-            debug("arena %p beingfree: %p", block_ptr, arena_ptr);
             if (!belongs_to_arena(block_ptr, arena_ptr)){
-                debug("no nie wiem tu jest koniec");
                 break;
             }
             if ((int64_t) block_ptr->mb_size >= (int64_t) size) {
@@ -174,20 +187,6 @@ mem_block_t *get_free_block(size_t size) {
     return NULL;
 }
 
-mem_arena_t *get_containing_arena(mem_block_t *ptr){
-    mem_arena_t *arena_ptr;
-    LIST_FOREACH(arena_ptr, arenas, ma_link) {
-        if (belongs_to_arena(ptr, arena_ptr))
-            return arena_ptr;
-    }
-}
-
-void set_boundary_tag(mem_block_t *block_ptr){
-    int64_t *boundary_tag = get_boundary_tag((char *) block_ptr);
-    if(belongs_to_arena(boundary_tag, get_containing_arena(block_ptr))){
-        *boundary_tag = abs64(block_ptr->mb_size);
-    }
-}
 
 void insert_on_free_blocks_list(mem_block_t *block_ptr, mem_arena_t *arena){
     mem_block_t *cur_block_ptr;
@@ -219,10 +218,10 @@ void memory_dump(){
         char *block_ptr = (char *) (&arena_ptr->ma_first);
         for (;belongs_to_arena(block_ptr, arena_ptr); block_ptr += abs64(((mem_block_t *) block_ptr)->mb_size)) {
             debug("    block %p of size %zu", block_ptr, ((mem_block_t * ) block_ptr)->mb_size);
-            debug("    it has boundary_tag %d", (int64_t) abs64(*get_boundary_tag(block_ptr)));
-            debug("    is it first? %d",is_first_block_on_arena(block_ptr, arena_ptr));
-            debug("    is it last?  %d",is_last_block_on_arena(block_ptr, arena_ptr));
-            debug("    is it free?  %d", is_free(block_ptr));
+            debug("    boundary_tag: %ld", (int64_t) abs64(*get_boundary_tag(block_ptr)));
+            debug("    first? %d", is_first_block_on_arena(block_ptr, arena_ptr));
+            debug("    last?  %d", is_last_block_on_arena(block_ptr, arena_ptr));
+            debug("    free?  %d", is_free((mem_block_t*) block_ptr));
             debug("    *~*~*~*~*~*~*~");
         }
         debug("~*~*~*~*~*~*~*~*~*~*~*~");
@@ -291,6 +290,7 @@ void __my_unsafe_free(void *ptr) {
   }
 
   if (is_first_block_on_arena(block_ptr, proper_arena) && is_last_block_on_arena(block_ptr, proper_arena)){
+      LIST_REMOVE(proper_arena, ma_link);
       munmap(proper_arena, proper_arena->size);
   }
 
@@ -304,7 +304,6 @@ void *__my_unsafe_memalign(size_t alignment, size_t size) {
       errno = EINVAL;
       return NULL;
     }
-    debug("do we make new huge chunk? %d > %d --> %d", size, MA_MAXSIZE, size > MA_MAXSIZE);
     if (size > MA_MAXSIZE){
         if (size >= SIZE_MAX - sizeof(mem_arena_t)){ //results in overflow so we cant allow it
             debug("size max");
@@ -312,7 +311,6 @@ void *__my_unsafe_memalign(size_t alignment, size_t size) {
             return NULL;
         }
         size_t rounded_size = round_size_to_alignment(size + sizeof(mem_arena_t), getpagesize());
-        debug("big_rounded_size %lld", rounded_size);
         void *new_arena = append_new_arena(rounded_size);
 
         if(new_arena == MAP_FAILED){
@@ -326,7 +324,6 @@ void *__my_unsafe_memalign(size_t alignment, size_t size) {
     }
 
     size_t memalign_size = get_size_for_memalign(size + alignment);
-//    memory_dump();
     mem_block_t *ptr = get_free_block(memalign_size);
     if (ptr == NULL){
         append_new_arena(MA_MAXSIZE);
@@ -339,17 +336,15 @@ void *__my_unsafe_memalign(size_t alignment, size_t size) {
     }
     size_t current_size = ptr->mb_size;
 
-    mem_block_t *aligned_ptr_metadata = ((char *) ptr) + (alignment - ((uintptr_t) ptr % alignment)) - sizeof(void *);
+    mem_block_t *aligned_ptr_metadata = (mem_block_t *)(((char *) ptr) + (alignment - ((uintptr_t) ptr % alignment)) - sizeof(void *));
     size_t left_block = (uintptr_t) aligned_ptr_metadata - (uintptr_t) ptr;
-    debug("first - memalign_size %d", memalign_size);
-    debug("current_size %d, left_block %d", current_size, left_block);
     if (left_block != 0){
         if (left_block == 16){ //left block is too small, try to merge it with neighbour
             LIST_INSERT_AFTER(ptr, aligned_ptr_metadata, mb_link);
             LIST_REMOVE(ptr, mb_link);
             init_block(aligned_ptr_metadata, current_size - left_block);
 
-            mem_block_t *prev_block = get_prev_block(ptr);
+            mem_block_t *prev_block = get_prev_block((char *) ptr);
             init_block(prev_block, abs64(prev_block->mb_size) + left_block);
             if(!is_free(prev_block)){
                 prev_block->mb_size *= -1;
@@ -360,11 +355,10 @@ void *__my_unsafe_memalign(size_t alignment, size_t size) {
             LIST_INSERT_AFTER(ptr, aligned_ptr_metadata, mb_link);
         }
     }
-//    memory_dump();
     size_t final_size = get_size_for_memalign(size);
     mem_arena_t *proper_arena = get_containing_arena(aligned_ptr_metadata);
     if (aligned_ptr_metadata->mb_size - final_size >= 32){
-        mem_block_t *right_block = ((char *) aligned_ptr_metadata) + final_size;
+        mem_block_t *right_block = (mem_block_t *) (((char *) aligned_ptr_metadata) + final_size);
         if (belongs_to_arena(right_block, proper_arena)){
             init_block(right_block, aligned_ptr_metadata->mb_size - final_size);
             LIST_INSERT_AFTER(aligned_ptr_metadata, right_block, mb_link);
@@ -373,7 +367,6 @@ void *__my_unsafe_memalign(size_t alignment, size_t size) {
     }
     LIST_REMOVE(aligned_ptr_metadata, mb_link);
     aligned_ptr_metadata->mb_size *= -1;
-//    memory_dump();
     return &aligned_ptr_metadata->mb_data[0];
 }
 
@@ -394,12 +387,10 @@ void *__my_primitive_realloc(void *ptr, size_t size){
         __my_unsafe_free(ptr);
         return NULL;
     }
-    if (size > MA_MAXSIZE){
-        if (size >= SIZE_MAX - sizeof(mem_arena_t)){ //results in overflow so we cant allow it
+    if (size >= SIZE_MAX - sizeof(mem_arena_t)){ //results in overflow so we cant allow it
             debug("size max");
             errno = ENOMEM;
             return NULL;
-        }
     }
     mem_block_t *block_ptr = get_mem_block(ptr);
     void* new_data_ptr = __my_unsafe_malloc(size);
@@ -409,7 +400,6 @@ void *__my_primitive_realloc(void *ptr, size_t size){
 }
 
 void *__my_unsafe_realloc(void *ptr, size_t size) {
-//    return NULL;
   debug("%s(%p, %ld)", __func__, ptr, size);
   if (ptr == NULL){
       return __my_unsafe_malloc(size);
@@ -441,7 +431,7 @@ void *__my_unsafe_realloc(void *ptr, size_t size) {
   }
 
 
-  int64_t rounded_size = get_size_for_memalign(size);//round_size_to_alignment(size + 2*sizeof(void *), MB_ALIGNMENT);
+  int64_t rounded_size = get_size_for_memalign(size);
   if (block_size > rounded_size){
     //we truncate this block
     //[M|X|X|X|X|X|X|X|X|X|X|B|M| | | | | ]
@@ -450,17 +440,17 @@ void *__my_unsafe_realloc(void *ptr, size_t size) {
     //  ^ptr                  ^next_block
     //^block_ptr      ^middle_block
     init_block(block_ptr, rounded_size);
-    void *middle_block = get_next_block(block_ptr);
+    void *middle_block = get_next_block((char *) block_ptr);
     mem_arena_t *proper_arena = get_containing_arena(middle_block);
     insert_on_free_blocks_list(middle_block, proper_arena);
     return ptr;
   }
   if (block_size < rounded_size){
-      mem_block_t *next_block = get_next_block(block_ptr);
+      mem_block_t *next_block = get_next_block((char *) block_ptr);
       if (next_block->mb_size >= rounded_size - block_size){ //automaticaly it has to be free since > 0
           size_t current_next_size = next_block->mb_size;
           init_block(next_block, rounded_size - block_size);
-          mem_block_t *remaining_block = get_next_block(next_block);
+          mem_block_t *remaining_block = get_next_block((char *) next_block);
           init_block(remaining_block, current_next_size - rounded_size + block_size);
 
           mem_arena_t *proper_arena = get_containing_arena(next_block);
