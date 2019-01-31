@@ -1,0 +1,1 @@
+Implementation of user-level memory allocator as task for operating systems course at University of Wrocław
