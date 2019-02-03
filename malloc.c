@@ -234,7 +234,7 @@ void memory_dump(){
 void __my_unsafe_free(void *ptr) {
 //    return;
   debug("%s(%p)", __func__, ptr);
-  return;
+  //return;
   if(ptr == NULL){
       return;
   }
@@ -249,7 +249,7 @@ void __my_unsafe_free(void *ptr) {
       return;
   }
   block_ptr->mb_size *= -1; //now free
-  mem_block_t *left_guy, *right_guy;
+  mem_block_t *left_guy = NULL, *right_guy = NULL;
   if(!is_first_block_on_any_arena(block_ptr)){
       left_guy = get_prev_block((char *) block_ptr);
       if (!is_free(left_guy)){
@@ -276,9 +276,9 @@ void __my_unsafe_free(void *ptr) {
   }
   if(right_guy != NULL){
       merge_count++;
-      init_block(block_ptr, abs64(block_ptr->mb_size) + abs64(right_block->mb_size));
       LIST_INSERT_BEFORE(right_block, block_ptr, mb_link);
       LIST_REMOVE(right_block, mb_link);
+      init_block(block_ptr, abs64(block_ptr->mb_size) + abs64(right_block->mb_size));
   }
 
  // mem_arena_t *proper_arena = get_containing_arena(block_ptr);
